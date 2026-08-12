@@ -6,7 +6,7 @@ use crate::input::{Column, Data, DataKind, Document};
 use crate::json::{self, Layout};
 
 /// How many columns a single horizontal step moves.
-const HSTEP: usize = 10;
+const HSTEP: usize = 16;
 
 pub struct App {
     pub doc: Document,
