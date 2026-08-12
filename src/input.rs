@@ -79,7 +79,8 @@ pub enum DataKind {
 #[derive(Debug)]
 pub enum Error {
     Io(io::Error),
-    /// The input has no `----+----` rule, so there is no table to show.
+    /// The input has no `----+----` or `────┼────` rule, so there is no
+    /// table to show.
     NotATable,
 }
 
@@ -96,28 +97,37 @@ impl Document {
 
     /// Parse psql's aligned output.
     ///
-    /// psql prints ` a | b ` over `---+---`, so the `+` in the rule mark where
-    /// the fields end and each field carries one space of padding on either
-    /// side. Anything above the header or below the last row — blank lines,
-    /// `(13 rows)`, timings — is dropped.
+    /// psql prints ` a | b ` over `---+---`, so the junctions in the rule mark
+    /// where the fields end and each field carries one space of padding on
+    /// either side. `\pset linestyle unicode` draws the same shape in box
+    /// characters, and both are read here. Anything above the header or below
+    /// the last row — blank lines, `(13 rows)`, timings — is dropped.
     pub fn from_str(text: &str) -> Result<Self, Error> {
         let lines: Vec<String> = text
             .split('\n')
             .map(|line| sanitize(line.strip_suffix('\r').unwrap_or(line)))
             .collect();
 
-        let rule = lines
+        let (rule, style) = lines
             .iter()
-            .position(|l| is_rule(l))
+            .enumerate()
+            .find_map(|(i, l)| rule_style(l).map(|s| (i, s)))
             .ok_or(Error::NotATable)?;
         let header = &lines[rule.checked_sub(1).ok_or(Error::NotATable)?];
 
-        // A rule is `-` and `+` only, so its byte offsets are display columns.
-        let separators: Vec<usize> = lines[rule].match_indices('+').map(|(i, _)| i).collect();
-        if !separators_line_up(header, &separators) {
+        // A rule is fill and junction characters only, and both are one column
+        // wide, so its character indices are its display columns.
+        let separators: Vec<usize> = lines[rule]
+            .chars()
+            .enumerate()
+            .filter(|&(_, c)| c == style.junction)
+            .map(|(i, _)| i)
+            .collect();
+
+        if !separators_line_up(header, &separators, style) {
             return Err(Error::NotATable);
         }
-        let spans = field_spans(lines[rule].len(), &separators);
+        let spans = field_spans(display_width(&lines[rule]), &separators);
 
         // Rows run until the blank line or `(13 rows)` psql puts underneath.
         let rows: Vec<Vec<Data>> = lines[rule + 1..]
@@ -288,10 +298,40 @@ fn parse_bytea(text: &str) -> Option<Vec<u8>> {
 }
 
 /// A line of only `-` and `+`, with at least one `-`.
-fn is_rule(line: &str) -> bool {
-    !line.is_empty()
-        && line.bytes().all(|b| b == b'-' || b == b'+')
-        && line.bytes().any(|b| b == b'-')
+/// The characters psql draws its grid with, as picked by `\pset linestyle`.
+///
+/// Every one of them is a single display column wide in both styles, so a
+/// rule's character indices are also its display columns.
+struct Linestyle {
+    fill: char,
+    junction: char,
+    separator: char,
+}
+
+const LINESTYLES: [Linestyle; 2] = [
+    // `\pset linestyle ascii`, the default.
+    Linestyle {
+        fill: '-',
+        junction: '+',
+        separator: '|',
+    },
+    // `\pset linestyle unicode`.
+    Linestyle {
+        fill: '─',
+        junction: '┼',
+        separator: '│',
+    },
+];
+
+/// Which linestyle `line` is a rule in, if it is one at all.
+///
+/// The two styles share no characters, so a line drawn in a mix of them — which
+/// psql never emits — matches neither.
+fn rule_style(line: &str) -> Option<&'static Linestyle> {
+    LINESTYLES.iter().find(|style| {
+        // Needing a fill character rules an empty line out along the way.
+        line.contains(style.fill) && line.chars().all(|c| c == style.fill || c == style.junction)
+    })
 }
 
 /// psql's row count footer, e.g. `(13 rows)`.
@@ -316,12 +356,13 @@ fn field_spans(rule_width: usize, separators: &[usize]) -> Vec<Range<usize>> {
     spans
 }
 
-/// Check the header has a `|` above every separator, which is what tells a real
-/// table apart from prose that happens to sit above a line of dashes.
-fn separators_line_up(header: &str, separators: &[usize]) -> bool {
+/// Check the header has a column separator above every junction, which is what
+/// tells a real table apart from prose that happens to sit above a line of
+/// dashes.
+fn separators_line_up(header: &str, separators: &[usize], style: &Linestyle) -> bool {
     separators
         .iter()
-        .all(|&col| header[byte_at_column(header, col)..].starts_with('|'))
+        .all(|&col| header[byte_at_column(header, col)..].starts_with(style.separator))
 }
 
 /// The text of one field of `line`, padding trimmed off.
@@ -431,9 +472,9 @@ impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Io(e) => write!(f, "{e}"),
-            Self::NotATable => {
-                f.write_str("input is not an aligned table (expected psql's ----+---- output)")
-            }
+            Self::NotATable => f.write_str(
+                "input is not an aligned table (expected psql's ----+---- or ────┼──── output)",
+            ),
         }
     }
 }
@@ -443,26 +484,35 @@ impl std::error::Error for Error {}
 /// Lay cells out the way psql would, for tests that need input to parse.
 #[cfg(test)]
 pub fn psql(rows: &[Vec<&str>]) -> String {
+    lay_out(rows, &LINESTYLES[0])
+}
+
+#[cfg(test)]
+fn lay_out(rows: &[Vec<&str>], style: &Linestyle) -> String {
     let widths: Vec<usize> = (0..rows[0].len())
         .map(|i| rows.iter().map(|r| display_width(r[i])).max().unwrap_or(0))
         .collect();
 
+    let separator = style.separator.to_string();
     let line = |cells: &Vec<&str>| {
         cells
             .iter()
             .zip(&widths)
             .map(|(c, w)| format!(" {c:<w$} "))
             .collect::<Vec<_>>()
-            .join("|")
+            .join(&separator)
     };
 
-    let rule: Vec<String> = widths.iter().map(|w| "-".repeat(w + 2)).collect();
+    let rule: Vec<String> = widths
+        .iter()
+        .map(|w| style.fill.to_string().repeat(w + 2))
+        .collect();
     let body: Vec<String> = rows[1..].iter().map(line).collect();
 
     format!(
         "{}\n{}\n{}\n({} rows)\n\n",
         line(&rows[0]),
-        rule.join("+"),
+        rule.join(&style.junction.to_string()),
         body.join("\n"),
         body.len(),
     )
@@ -606,10 +656,55 @@ mod tests {
 
     #[test]
     fn rejects_input_that_is_not_a_table() {
-        // A rule with no header above it, and prose that has neither.
-        for text in ["---+---\n 1 | 2\n", "just some prose\n", ""] {
+        // A rule with no header above it, prose that has neither, and a rule
+        // whose junction does not match its fill.
+        for text in [
+            "---+---\n 1 | 2\n",
+            "just some prose\n",
+            "",
+            " a │ b \n---┼---\n 1 │ 2\n",
+        ] {
             assert!(matches!(Document::from_str(text), Err(Error::NotATable)));
         }
+    }
+
+    #[test]
+    fn reads_both_linestyles() {
+        // `\pset linestyle unicode` draws the same table in box characters,
+        // which are three bytes apiece — so display columns and byte offsets
+        // part ways, and the field spans have to follow the former.
+        let cells = &[
+            vec!["id", "name", "seen"],
+            vec!["1", "alice", "2025-08-27 07:07:35+00"],
+            vec!["22", "", "2026-06-10 08:30:00+00"],
+        ];
+
+        let unicode = lay_out(cells, &LINESTYLES[1]);
+        assert!(unicode.contains('┼') && unicode.contains('│'));
+
+        let ascii = Document::from_str(&psql(cells)).expect("an ascii table");
+        let doc = Document::from_str(&unicode).expect("a unicode table");
+
+        assert_eq!(doc.rows, ascii.rows);
+        assert_eq!(doc.rows[0][1], Data::Text("alice".into()));
+        assert_eq!(doc.columns[2].kind, DataKind::TimestampTz);
+
+        let names: Vec<&str> = doc.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["id", "name", "seen"]);
+        for (column, same) in doc.columns.iter().zip(&ascii.columns) {
+            assert_eq!((column.width, column.kind), (same.width, same.kind));
+        }
+    }
+
+    #[test]
+    fn reads_a_unicode_table_with_wide_cells() {
+        // Wide characters in the cells as well as the grid: the header names
+        // still have to be cut at the right columns.
+        let doc = Document::from_str(" 名前 │ n \n──────┼───\n 日本 │ 1 \n").expect("a table");
+
+        let names: Vec<&str> = doc.columns.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(names, ["名前", "n"]);
+        assert_eq!(doc.rows, [[Data::Text("日本".into()), Data::Integer(1)]]);
     }
 
     #[test]

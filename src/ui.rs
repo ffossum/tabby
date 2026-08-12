@@ -10,6 +10,7 @@ use std::ops::Range;
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout as Areas};
 use ratatui::style::{Color, Style};
+use ratatui::symbols::line;
 use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
@@ -17,8 +18,20 @@ use crate::app::App;
 use crate::input::{Data, DataKind, display_width, slice_columns};
 use crate::json::{self, Layout};
 
+/// The glyphs the grid is drawn with — the shape psql draws in ASCII, in box
+/// characters. Swapping this for `ROUNDED`, `THICK` or `DOUBLE` re-skins it.
+///
+/// Every one of them is a single display column wide, so the layout arithmetic
+/// is the same as it was for `-`, `+` and `|`.
+const GRID: line::Set = line::NORMAL;
+
 /// A piece of a laid-out line: its text and how to paint it.
 type Segment = (String, Style);
+
+/// The grid recedes so the values stand out.
+fn grid_style() -> Style {
+    Style::new().dark_gray()
+}
 
 pub fn draw(frame: &mut Frame, app: &mut App) {
     let [table_area, status_area] =
@@ -75,13 +88,13 @@ fn header_segments(app: &App) -> Vec<Segment> {
     join(&names)
 }
 
-/// The rule spans the padding as well, and joins with `+` rather than `|`.
+/// The rule spans the padding as well, and crosses rather than meets.
 fn rule_segments(app: &App) -> Vec<Segment> {
     let dashes: Vec<String> = (0..app.doc.columns.len())
-        .map(|i| "-".repeat(app.width(i) + 2))
+        .map(|i| GRID.horizontal.repeat(app.width(i) + 2))
         .collect();
 
-    vec![(dashes.join("+"), Style::new().dark_gray())]
+    vec![(dashes.join(GRID.cross), grid_style())]
 }
 
 /// Lay one row out, as one line per line of its tallest cell.
@@ -156,14 +169,14 @@ fn fill(mut line: Vec<Segment>, width: usize) -> Vec<Segment> {
     line
 }
 
-/// Glue one line of every column together with the padding and `|` separators
-/// psql puts between them.
+/// Glue one line of every column together with the padding and separators psql
+/// puts between them.
 fn join(cells: &[Vec<Segment>]) -> Vec<Segment> {
     let mut out = Vec::with_capacity(cells.len() * 4);
 
     for (i, cell) in cells.iter().enumerate() {
         if i > 0 {
-            out.push(("|".to_string(), Style::new()));
+            out.push((GRID.vertical.to_string(), grid_style()));
         }
 
         out.push((" ".to_string(), Style::new()));
@@ -299,10 +312,10 @@ mod tests {
         assert_eq!(
             lines[..4],
             [
-                " id | name  | ratio   ",
-                "----+-------+-------  ",
-                "  1 | alice |  0.25   ",
-                " 22 |       |  3.00   ",
+                " id │ name  │ ratio   ",
+                "────┼───────┼───────  ",
+                "  1 │ alice │  0.25   ",
+                " 22 │       │  3.00   ",
             ]
             .map(|l| format!("{l:<24}"))
         );
@@ -316,7 +329,7 @@ mod tests {
         // Folded, the value sits on the one line its row is tall.
         assert_eq!(
             render(&mut app, 20, 5)[2],
-            format!("{:<20}", "  1 | {\"a\":1}")
+            format!("{:<20}", "  1 │ {\"a\":1}")
         );
 
         app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
@@ -325,11 +338,11 @@ mod tests {
         assert_eq!(
             lines[..5],
             [
-                " id |   doc    ",
-                "----+----------",
-                "  1 | {        ",
-                "    |   \"a\": 1 ",
-                "    | }        ",
+                " id │   doc    ",
+                "────┼──────────",
+                "  1 │ {        ",
+                "    │   \"a\": 1 ",
+                "    │ }        ",
             ]
             .map(|l| format!("{l:<20}"))
         );
@@ -343,7 +356,7 @@ mod tests {
 
         let lines = render(&mut app, 12, 5);
 
-        assert_eq!(lines[0], "name  | rati");
-        assert_eq!(lines[2], "alice |  0.2");
+        assert_eq!(lines[0], "name  │ rati");
+        assert_eq!(lines[2], "alice │  0.2");
     }
 }
