@@ -20,13 +20,19 @@ type Tui = Terminal<CrosstermBackend<BufWriter<File>>>;
 
 fn main() -> io::Result<()> {
     let doc = match std::env::args().nth(1) {
-        Some(path) => Document::from_path(&path)?,
+        Some(path) => Document::from_path(&path),
         None if io::stdin().is_terminal() => {
             eprintln!("usage: tabby [FILE]   (or pipe data in: psql -c '...' | tabby)");
             std::process::exit(2);
         }
-        None => Document::from_reader(io::stdin().lock())?,
+        None => Document::from_reader(io::stdin().lock()),
     };
+
+    // Report before taking over the terminal, so the message survives.
+    let doc = doc.unwrap_or_else(|e| {
+        eprintln!("tabby: {e}");
+        std::process::exit(2);
+    });
 
     let mut terminal = init()?;
     let result = run(&mut terminal, App::new(doc));

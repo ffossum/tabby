@@ -32,14 +32,14 @@ impl App {
         }
     }
 
-    /// Largest valid `top`: scrolling stops with the last line at the bottom.
+    /// Largest valid `top`: scrolling stops with the last row at the bottom.
     fn max_top(&self) -> usize {
-        self.doc.lines.len().saturating_sub(self.view_height)
+        self.doc.rows.len().saturating_sub(self.view_height)
     }
 
-    /// Largest valid `left`: scrolling stops with the widest line flush right.
+    /// Largest valid `left`: scrolling stops with the last column flush right.
     fn max_left(&self) -> usize {
-        self.doc.max_width.saturating_sub(self.view_width)
+        self.doc.width().saturating_sub(self.view_width)
     }
 
     fn scroll_vertical(&mut self, delta: isize) {
@@ -92,14 +92,18 @@ impl App {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::input::Document;
+    use crate::input::{Document, psql};
 
-    fn app(lines: usize, width: usize) -> App {
-        let text = (0..lines)
-            .map(|i| format!("{:width$}", i, width = width))
-            .collect::<Vec<_>>()
-            .join("\n");
-        let mut app = App::new(Document::from_str(&text));
+    /// A one-column table of `rows` rows, laid out `width` columns wide plus
+    /// the space either side of the cells.
+    fn app(rows: usize, width: usize) -> App {
+        let name = "n".repeat(width);
+        let ids: Vec<String> = (0..rows).map(|i| i.to_string()).collect();
+
+        let mut table = vec![vec![name.as_str()]];
+        table.extend(ids.iter().map(|id| vec![id.as_str()]));
+
+        let mut app = App::new(Document::from_str(&psql(&table)).expect("a table"));
         app.view_height = 10;
         app.view_width = 10;
         app
@@ -129,12 +133,13 @@ mod tests {
     }
 
     #[test]
-    fn horizontal_scroll_clamps_to_widest_line() {
+    fn horizontal_scroll_clamps_to_last_column() {
+        // 14 columns of cell plus a space either side, against a 10 wide view.
         let mut a = app(3, 14);
         press(&mut a, KeyCode::Char('$'));
-        assert_eq!(a.left, 4);
+        assert_eq!(a.left, 6);
         press(&mut a, KeyCode::Right);
-        assert_eq!(a.left, 4);
+        assert_eq!(a.left, 6);
         press(&mut a, KeyCode::Char('0'));
         assert_eq!(a.left, 0);
         press(&mut a, KeyCode::Left);
