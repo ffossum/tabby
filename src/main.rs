@@ -1,5 +1,6 @@
 mod app;
 mod input;
+mod json;
 mod ui;
 
 use std::fs::{File, OpenOptions};

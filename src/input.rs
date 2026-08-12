@@ -146,23 +146,6 @@ impl Document {
 
         Ok(Self { columns, rows })
     }
-
-    /// Total display width of the laid-out table: ` a | b ` is two columns of
-    /// one, padded and joined by a separator.
-    pub fn width(&self) -> usize {
-        let cells: usize = self.columns.iter().map(|c| c.width + 2).sum();
-        cells + self.columns.len().saturating_sub(1)
-    }
-
-    /// The column covering `display_col`, or the first one to its right if it
-    /// falls on a separator.
-    pub fn column_at(&self, display_col: usize) -> Option<&Column> {
-        let mut x = 0usize;
-        self.columns.iter().find(|c| {
-            x += c.width + 3;
-            x - 1 > display_col
-        })
-    }
 }
 
 impl Data {
@@ -566,10 +549,6 @@ mod tests {
             doc.columns[4].width,
             display_width("2025-08-27 07:07:35.502286+00:00")
         );
-        // Each column takes its width plus a space either side, and the
-        // columns are joined by `|`.
-        let expected: usize = doc.columns.iter().map(|c| c.width + 3).sum::<usize>() - 1;
-        assert_eq!(doc.width(), expected);
     }
 
     #[test]
@@ -623,16 +602,6 @@ mod tests {
             r#"{"kam":-999,"active":false}"#
         );
         assert_eq!(Data::Null.to_string(), "");
-    }
-
-    #[test]
-    fn finds_column_under_a_display_column() {
-        let doc = doc();
-
-        assert_eq!(doc.column_at(2).unwrap().name, "id");
-        // On the `|` separator: report the column it runs into.
-        assert_eq!(doc.column_at(5).unwrap().name, "name");
-        assert!(doc.column_at(999).is_none());
     }
 
     #[test]
