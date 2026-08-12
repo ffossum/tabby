@@ -2,26 +2,27 @@
 
 use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 
-use crate::input::{Column, Data, DataKind, Document};
+use crate::input::{Column, Data, Document, digest};
 use crate::json::{self, Layout};
 
 /// How many columns a single horizontal step moves.
-const HSTEP: usize = 16;
+const HSTEP: usize = 30;
 
 pub struct App {
     pub doc: Document,
-    /// Which columns are pretty-printed. Only JSON columns ever are.
-    pub expanded: Vec<bool>,
-    /// Display width of each column as things stand: a column that is
-    /// pretty-printed is as wide as its widest indented line, not as wide as
-    /// the whole value on one line.
+    /// Which columns are showing their readable form rather than the one psql
+    /// printed. It cuts both ways: JSON grows, spread over several lines, while
+    /// a `bytea` blob shrinks to its size and checksum.
+    pub readable: Vec<bool>,
+    /// Display width of each column as things stand, which depends on which
+    /// form each is being shown in.
     widths: Vec<usize>,
     /// Line each row starts on, with a final entry for the total. Rows are one
-    /// line tall until something is expanded.
+    /// line tall until some JSON is pretty-printed.
     offsets: Vec<usize>,
-    /// Topmost visible line of the body. Lines, not rows: an expanded row is
-    /// taller than the screen often enough that paging by row would strand its
-    /// bottom half.
+    /// Topmost visible line of the body. Lines, not rows: a pretty-printed row
+    /// is taller than the screen often enough that paging by row would strand
+    /// its bottom half.
     pub top: usize,
     /// Display column of the leftmost visible cell.
     pub left: usize,
@@ -35,7 +36,7 @@ pub struct App {
 impl App {
     pub fn new(doc: Document) -> Self {
         let mut app = Self {
-            expanded: vec![false; doc.columns.len()],
+            readable: vec![false; doc.columns.len()],
             doc,
             widths: Vec::new(),
             offsets: Vec::new(),
@@ -50,7 +51,7 @@ impl App {
         app
     }
 
-    /// Measure the table again after something expanded or collapsed.
+    /// Measure the table again after a column changed form.
     fn relayout(&mut self) {
         self.widths = (0..self.doc.columns.len())
             .map(|i| self.column_width(i))
@@ -67,7 +68,9 @@ impl App {
 
     fn column_width(&self, index: usize) -> usize {
         let column = &self.doc.columns[index];
-        if !self.expanded[index] {
+        // The document measured every column from the form psql printed, which
+        // is still the one being shown.
+        if !self.readable[index] {
             return column.width;
         }
 
@@ -76,6 +79,7 @@ impl App {
             .iter()
             .map(|row| match &row[index] {
                 Data::Json(v) => json::measure(v, Layout::Pretty).1,
+                Data::Bytes(b) => crate::input::display_width(&digest(b)),
                 other => crate::input::display_width(&other.to_string()),
             })
             .chain([crate::input::display_width(&column.name)])
@@ -83,11 +87,13 @@ impl App {
             .unwrap_or(0)
     }
 
+    /// Only pretty-printed JSON takes more than a line; a blob's digest is one
+    /// line however big the blob is.
     fn row_height(&self, row: &[Data]) -> usize {
         row.iter()
-            .zip(&self.expanded)
-            .map(|(cell, &expanded)| match cell {
-                Data::Json(v) if expanded => json::measure(v, Layout::Pretty).0,
+            .zip(&self.readable)
+            .map(|(cell, &readable)| match cell {
+                Data::Json(v) if readable => json::measure(v, Layout::Pretty).0,
                 _ => 1,
             })
             .max()
@@ -130,20 +136,21 @@ impl App {
         })
     }
 
-    pub fn has_json(&self) -> bool {
-        self.doc.columns.iter().any(|c| c.kind == DataKind::Json)
+    pub fn has_readable(&self) -> bool {
+        self.doc.columns.iter().any(|c| c.kind.has_readable_form())
     }
 
-    /// Pretty-print the JSON columns, or fold them back onto one line.
+    /// Switch every column that has a readable form into it, or back to the
+    /// form psql printed.
     ///
     /// They move together: with no cursor there is no one column to mean, and
-    /// a table rarely has more than one JSON column anyway.
-    fn toggle_json(&mut self) {
-        let on = !self.expanded.iter().any(|&e| e);
+    /// one keypress to make a screenful legible beats hunting column by column.
+    fn toggle_readable(&mut self) {
+        let on = !self.readable.iter().any(|&r| r);
         let (anchor, _) = self.row_at(self.top);
 
         for (i, column) in self.doc.columns.iter().enumerate() {
-            self.expanded[i] = on && column.kind == DataKind::Json;
+            self.readable[i] = on && column.kind.has_readable_form();
         }
 
         self.relayout();
@@ -199,7 +206,7 @@ impl App {
             KeyCode::Char('0' | '^') => self.left = 0,
             KeyCode::Char('$') => self.left = self.max_left(),
 
-            KeyCode::Char('x') => self.toggle_json(),
+            KeyCode::Char('x') => self.toggle_readable(),
 
             _ => {}
         }
@@ -285,9 +292,9 @@ mod tests {
     }
 
     #[test]
-    fn folds_json_back_up_again() {
+    fn switches_json_between_its_two_forms() {
         let mut a = json_app();
-        assert!(a.has_json());
+        assert!(a.has_readable());
 
         // Folded: one line per row, and the column is as wide as the widest
         // value written on one line.
@@ -298,19 +305,54 @@ mod tests {
 
         // Expanded: three lines for the one-key value, four for the two-key
         // one, and the column is only as wide as one indented line.
-        assert_eq!(a.expanded, [false, true]);
+        assert_eq!(a.readable, [false, true]);
         assert_eq!((a.row_at(2), a.row_at(3)), ((0, 2), (1, 0)));
         assert_eq!(a.row_at(6), (1, 3));
         assert_eq!(a.width(1), r#"  "a": 1,"#.len());
 
         press(&mut a, KeyCode::Char('x'));
 
-        assert_eq!(a.expanded, [false, false]);
+        assert_eq!(a.readable, [false, false]);
         assert_eq!(a.row_at(1), (1, 0));
     }
 
+    /// One `x` has to move the JSON and the blobs at once, in opposite
+    /// directions: the JSON opens out over several lines while the blob
+    /// collapses from its hex to a digest.
     #[test]
-    fn expanding_keeps_the_top_row_in_place() {
+    fn one_key_switches_json_and_blobs_together() {
+        let long = format!("\\x{}", "ab".repeat(32));
+        let short = format!("\\x{}", "cd".repeat(8));
+        let text = psql(&[
+            vec!["id", "doc", "blob"],
+            vec!["1", r#"{"a": 1}"#, &long],
+            vec!["2", r#"{"b": 22}"#, &short],
+        ]);
+
+        let mut a = App::new(Document::from_str(&text).expect("a table"));
+        a.view_height = 10;
+        a.view_width = 40;
+
+        // Raw: compact JSON, and hex at two characters a byte plus the `\x`.
+        assert_eq!(a.readable, [false, false, false]);
+        assert_eq!((a.width(1), a.width(2)), (8, 66));
+        assert_eq!(a.row_at(1), (1, 0));
+
+        press(&mut a, KeyCode::Char('x'));
+
+        // `id` has no second form, so it is left alone.
+        assert_eq!(a.readable, [false, true, true]);
+        // The JSON column is now as wide as `  "b": 22`, three lines a row.
+        assert_eq!(a.width(1), 9);
+        assert_eq!(a.row_at(3), (1, 0));
+        // The blob column is down to `32 B  ` and eight characters of md5 —
+        // from 66 columns to 14, and still one line tall.
+        assert_eq!(a.width(2), 14);
+        assert_eq!(a.row_height(&a.doc.rows[0]), 3);
+    }
+
+    #[test]
+    fn changing_form_keeps_the_top_row_in_place() {
         let mut a = json_app();
         a.view_height = 1;
         press(&mut a, KeyCode::Down);

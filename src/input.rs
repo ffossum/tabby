@@ -254,6 +254,44 @@ impl DataKind {
     pub fn is_numeric(self) -> bool {
         matches!(self, Self::Integer | Self::Decimal)
     }
+
+    /// Whether this kind reads better in some form other than the one psql
+    /// printed, which is what the `x` key switches between.
+    pub fn has_readable_form(self) -> bool {
+        matches!(self, Self::Json | Self::Bytes)
+    }
+}
+
+/// How big a blob is and what is in it, for when its hex is far too wide to be
+/// worth the columns.
+///
+/// The checksum is the front of the md5 Postgres itself computes, so
+/// `select md5(value)` cross-checks against what is on screen. Eight characters
+/// is enough to tell two blobs apart by eye, which is all this is for.
+pub fn digest(bytes: &[u8]) -> String {
+    let md5 = format!("{:x}", md5::compute(bytes));
+
+    format!("{}  {}", byte_size(bytes.len()), &md5[..8])
+}
+
+/// A byte count in the largest unit that leaves it a whole number of digits.
+fn byte_size(n: usize) -> String {
+    const UNITS: [&str; 5] = ["B", "KiB", "MiB", "GiB", "TiB"];
+
+    let mut size = n as f64;
+    let mut unit = 0;
+
+    while size >= 1024.0 && unit < UNITS.len() - 1 {
+        size /= 1024.0;
+        unit += 1;
+    }
+
+    // Bytes are always whole; anything larger has been divided down, so one
+    // decimal keeps `1.5 KiB` from reading the same as `1.9 KiB`.
+    match unit {
+        0 => format!("{n} B"),
+        _ => format!("{size:.1} {}", UNITS[unit]),
+    }
 }
 
 /// A column's type is whatever its cells agree on. NULLs abstain, and whole
@@ -666,6 +704,31 @@ mod tests {
         ] {
             assert!(matches!(Document::from_str(text), Err(Error::NotATable)));
         }
+    }
+
+    #[test]
+    fn digests_a_blob_to_its_size_and_checksum() {
+        // The checksum is the front of what `select md5('hello')` returns, so
+        // the two can be compared by eye.
+        assert_eq!(digest(b"hello"), "5 B  5d41402a");
+        assert!("5d41402abc4b2a76b9719d911017c592".starts_with("5d41402a"));
+
+        // Long enough that the hex would be 8 KiB of screen; the digest is not.
+        let big = vec![0u8; 4096];
+        assert_eq!(digest(&big), "4.0 KiB  620f0b67");
+        assert_eq!(display_width(&digest(&big)), 17);
+    }
+
+    #[test]
+    fn scales_byte_counts_to_a_readable_unit() {
+        assert_eq!(byte_size(0), "0 B");
+        assert_eq!(byte_size(1023), "1023 B");
+        // Whole bytes below a kibibyte, one decimal above it.
+        assert_eq!(byte_size(1024), "1.0 KiB");
+        assert_eq!(byte_size(1536), "1.5 KiB");
+        assert_eq!(byte_size(1024 * 1024 * 3), "3.0 MiB");
+        // Nothing overflows past the largest unit we name.
+        assert!(byte_size(usize::MAX).ends_with(" TiB"));
     }
 
     #[test]

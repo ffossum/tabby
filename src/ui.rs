@@ -15,7 +15,7 @@ use ratatui::text::{Line, Span, Text};
 use ratatui::widgets::Paragraph;
 
 use crate::app::App;
-use crate::input::{Data, DataKind, display_width, slice_columns};
+use crate::input::{Data, DataKind, digest, display_width, slice_columns};
 use crate::json::{self, Layout};
 
 /// The glyphs the grid is drawn with — the shape psql draws in ASCII, in box
@@ -128,11 +128,19 @@ fn row_lines(app: &App, row: usize) -> Vec<Vec<Segment>> {
 /// Write one cell out, padded to its column, as one line or several.
 fn cell_lines(app: &App, column: usize, cell: &Data) -> Vec<Vec<Segment>> {
     let width = app.width(column);
+    let readable = app.readable[column];
 
     let lines = match cell {
         // JSON keeps colored_json's own colours rather than the column's.
-        Data::Json(value) if app.expanded[column] => spans(json::colored(value, Layout::Pretty)),
+        Data::Json(value) if readable => spans(json::colored(value, Layout::Pretty)),
         Data::Json(value) => spans(json::colored(value, Layout::Compact)),
+        // A blob's hex says nothing at a glance; its size and checksum do.
+        Data::Bytes(bytes) if readable => {
+            vec![vec![(
+                pad(&digest(bytes), width, false),
+                style(DataKind::Bytes),
+            )]]
+        }
         other => {
             let numeric = app.doc.columns[column].kind.is_numeric();
             vec![vec![(
@@ -262,15 +270,15 @@ fn status_line(app: &App) -> Paragraph<'static> {
         |c| format!("col {} {}", app.left + 1, c.name),
     );
 
-    let json = if !app.has_json() {
+    let form = if !app.has_readable() {
         ""
-    } else if app.expanded.iter().any(|&e| e) {
-        "x:fold  "
+    } else if app.readable.iter().any(|&r| r) {
+        "x:raw  "
     } else {
-        "x:json  "
+        "x:read  "
     };
 
-    let text = format!(" {first}-{last}/{total} rows  {column}  {percent}%  {json}q:quit ");
+    let text = format!(" {first}-{last}/{total} rows  {column}  {percent}%  {form}q:quit ");
 
     Paragraph::new(text).style(Style::new().reversed())
 }
@@ -345,6 +353,32 @@ mod tests {
                 "    │ }        ",
             ]
             .map(|l| format!("{l:<20}"))
+        );
+    }
+
+    #[test]
+    fn digests_a_blob_column() {
+        // `\x68656c6c6f` is "hello", whose md5 psql would also give as
+        // 5d41402abc4b2a76b9719d911017c592.
+        let text = psql(&[vec!["id", "blob"], vec!["1", "\\x68656c6c6f"]]);
+        let mut app = App::new(Document::from_str(&text).expect("a table"));
+
+        // Raw, the cell is the hex psql printed.
+        assert_eq!(
+            render(&mut app, 22, 5)[2],
+            format!("{:<22}", "  1 │ \\x68656c6c6f")
+        );
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('x'), KeyModifiers::NONE));
+
+        assert_eq!(
+            render(&mut app, 22, 5)[..3],
+            [
+                " id │     blob      ",
+                "────┼───────────────",
+                "  1 │ 5 B  5d41402a ",
+            ]
+            .map(|l| format!("{l:<22}"))
         );
     }
 
