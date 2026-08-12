@@ -5,7 +5,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use crate::input::Document;
 
 /// How many columns a single horizontal step moves.
-const HSTEP: usize = 1;
+const HSTEP: usize = 10;
 
 pub struct App {
     pub doc: Document,
@@ -75,7 +75,7 @@ impl App {
 
             KeyCode::Home | KeyCode::Char('g') => self.top = 0,
             KeyCode::End | KeyCode::Char('G') => self.top = self.max_top(),
-            KeyCode::Char('0') => self.left = 0,
+            KeyCode::Char('0' | '^') => self.left = 0,
             KeyCode::Char('$') => self.left = self.max_left(),
 
             _ => {}
